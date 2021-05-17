@@ -1,0 +1,693 @@
+#!/usr/bin/env python3
+# -*- encoding: utf-8 -*-
+
+import math
+import random
+import tkinter as tk
+from enum import IntEnum
+
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+
+
+class Individus(IntEnum):  # Différents types d'individus pouvant occuper une case
+    VIDE = 0
+    PROIE = 1
+    PROIEJEUNE = 11
+    PROIEINACT = 15
+    PRED = 2
+    PREDJEUNE = 21
+    PREDINACT = 25
+    OBSTACLE = 3
+
+
+class Indices(IntEnum):  # Position des différents attributs dans les listes représentant les cases de la grille
+    INDIVIDU = 0
+    RESSOURCES = 1
+    AGE = 2
+    ENERGIE = 3
+    COEFF_DEFENSE = 4
+    COEFF_CHASSE = 5
+    COEFF_RISQUE = 6
+    COEFF_ATTRACTION = 7
+    TERRAIN = 8
+
+
+class Terrain(IntEnum):  # Différents types de terrains au sein de l'environnement
+    PRAIRIE = 0
+    OBSTACLE = 1
+    FORET = 2
+    MARAIS = 3
+    DESERT = 4
+
+
+class ModeleProiePredateur:
+
+    # Paramètres ajustables
+
+    SHOW_GRILLE = True
+    SHOW_GENETICS = False
+    influence_age = True
+
+    pas = 1000
+
+    HAUTEUR = 100
+    LARGEUR = 100
+    COTE = 8
+
+    TAUX_NAIS_PROIE = 0.6
+    TAUX_MORT_PROIE = 0.4
+    TAUX_NAIS_PRED = 0.7
+    TAUX_MORT_PRED = 0.2
+    TAUX_SUCCES_CHASSE = 0.8
+    
+    RESSOURCES_MAX_INITIAL = 20
+    ENERGIE_MAX_INITIAL_PROIE = 20
+    ENERGIE_MAX_INITIAL_PRED = 30
+    ENERGIE_MIN_INITIAL_PROIE = 5
+    ENERGIE_MIN_INITIAL_PRED = 10
+    PERTES_PROIE_DEPLACEMENT = 1
+    PERTES_PROIE_REPRODUCTION = 3
+    GAIN_PROIE_ALIMENTATION = 2
+    PERTES_PRED_DEPLACEMENT = 1
+    PERTES_PRED_REPRODUCTION = 3
+    GAIN_PRED_ALIMENTATION = 10
+    GAIN_MAX_RESSOURCES_VIDE = 5
+    GAIN_MAX_RESSOURCES_PRED = 3
+    
+    sigma = 50
+    COEFF_MIN = 10
+    COEFF_MAX = 500
+    COEFF_MOYEN = 100
+    
+    coeffs_terrain_chasse = [1.0, 1.0, 0.5, 2.0, 1.0]
+
+    proba_propagation_proie = 0.8
+    proba_propagation_pred = 0.5
+    proba_propagation_terrain = 0.75
+    
+    p_catastrophe = 0.01
+    n_catastrophe = 5
+    rayon_max = 10
+    
+    # Initialisation
+    
+    nproie = 0
+    npred = 0
+
+    def __init__(self, nb_proie: int = 2000, nb_pred: int = 1000, nb_obs=100, nb_for=100, nb_mar=100, nb_des=100):
+        self.gen = 0
+        self.nb_proie_initial = nb_proie
+        self.nb_pred_initial = nb_pred
+        self.nb_obs_initial = nb_obs
+        self.nb_for_initial = nb_for
+        self.nb_mar_initial = nb_mar
+        self.nb_des_initial = nb_des
+
+        self.environnement = [[[Individus.VIDE, 0, 0, 0, 0, 0, 0, 0, Terrain.PRAIRIE] for _ in range(self.LARGEUR)]
+                              for _ in range(self.HAUTEUR)]
+        self.tableau = [[[] for _ in range(self.LARGEUR)] for _ in range(self.HAUTEUR)]
+
+        self._initialisation()
+
+    def _initialisation(self):
+
+        if self.nb_proie_initial + self.nb_pred_initial + self.nb_obs_initial > self.HAUTEUR * self.LARGEUR:
+            raise ValueError("Dimensions incompatibles")
+        if self.TAUX_MORT_PRED == 1 or self.TAUX_MORT_PROIE == 1:
+            raise ValueError("Paramètres incompatibles")
+
+        for x in range(self.LARGEUR):
+            for y in range(self.HAUTEUR):
+                self.environnement[x][y][Indices.RESSOURCES] = random.randint(0, self.RESSOURCES_MAX_INITIAL)
+
+        # Initialisation des différents types de terrains
+
+        n_obs = 0
+        n_for = 0
+        n_mar = 0
+        n_des = 0
+
+        n_terrains = [-1, n_obs, n_for, n_mar, n_des]
+        n_terrains_initial = [-1, self.nb_obs_initial, self.nb_for_initial, self.nb_mar_initial, self.nb_des_initial]
+        liste_terrains = [Terrain.PRAIRIE, Terrain.OBSTACLE, Terrain.FORET, Terrain.MARAIS, Terrain.DESERT]
+
+        for i in range(1, len(n_terrains)):
+            while n_terrains[i] != n_terrains_initial[i]:
+                x = random.randint(0, self.HAUTEUR - 1)
+                y = random.randint(0, self.LARGEUR - 1)
+                if self.environnement[x][y][Indices.TERRAIN] is Terrain.PRAIRIE:
+                    self.propagation_terrain(x, y, liste_terrains[i], self.proba_propagation_terrain)
+                    n_terrains[i] += 1
+
+        # Initialisation des proies et prédateurs
+
+        while self.nproie <= self.nb_proie_initial:
+            self.propagation_proies(random.randint(0, self.HAUTEUR - 1), random.randint(0, self.LARGEUR - 1),
+                                    self.proba_propagation_proie)
+
+        while self.npred <= self.nb_pred_initial:
+            self.propagation_preds(random.randint(0, self.HAUTEUR - 1), random.randint(0, self.LARGEUR - 1),
+                                   self.proba_propagation_pred)
+
+    # Entourage
+
+    def cases_voisines(self, x: int, y: int, individu: Individus):
+        """
+        Calcule la liste des cases adjacentes à la case donnée en paramètre (voisinage de Moore de rayon 1)
+        et contenant le type d'individu recherché
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        :param individu: le type d'individu devant être contenu dans les cases recherchées
+        :return La liste des cases recherchées
+        """
+        entourage = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+        v = []
+        for case_x, case_y in entourage:
+            if (0 <= (x + case_x) < self.HAUTEUR and 0 <= (y + case_y) < self.LARGEUR
+                    and self.environnement[x + case_x][y + case_y][Indices.INDIVIDU] is individu):
+                v.append((x + case_x, y + case_y))
+        return v
+
+    def cases_eloignees(self, x: int, y: int, individu: Individus):
+        """
+        Considère les cases situées à une distance de 2 cases en ligne droite de la case donnée en paramètre,
+        occupée par le type d'individu recherché et dont la case intermédiaire est inoccupée,
+        et renvoie la liste des cases intermédiaires correspondantes
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        :param individu: le type d'individu devant être contenu dans les cases recherchées
+        :return La liste des cases intermédiaires corresoibdabtes
+        """
+        entourage = [((2, 0), (1, 0)), ((0, 2), (0, 1)), ((-2, 0), (-1, 0)), ((0, -2), (0, -1))]
+        ve = []
+        for (case_e_x, case_e_y), (case_v_x, case_v_y) in entourage:
+            if (0 <= (x + case_e_x) < self.HAUTEUR and 0 <= (y + case_e_y) < self.LARGEUR
+                    and self.environnement[x + case_e_x][y + case_e_y][Indices.INDIVIDU] is individu
+                    and self.environnement[x + case_v_x][y + case_v_y][Indices.INDIVIDU] is Individus.VIDE):
+                ve.append((x + case_v_x, y + case_v_y))
+        return ve
+
+    # Répartition des populations
+
+    def propagation_proies(self, x: int, y: int, p: float):
+        """
+        Génère une proie dans la case (x, y) si celle-ci est vide ;
+        a une chance décroissante de recommencer pour les cases adjacentes
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        :param p: probabilité de se propager à une case adjacente
+        """
+        if self.nproie <= self.nb_proie_initial and self.environnement[x][y][Indices.INDIVIDU] == Individus.VIDE:
+            self.nproie += 1
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.PROIE
+            self.environnement[x][y][Indices.AGE] = random.randint(0, int(1 / self.TAUX_MORT_PROIE))
+            self.environnement[x][y][Indices.ENERGIE] = random.randint(self.ENERGIE_MIN_INITIAL_PROIE,
+                                                                       self.ENERGIE_MAX_INITIAL_PROIE)
+            self.environnement[x][y][Indices.COEFF_DEFENSE] = max(min(self.COEFF_MAX, int(
+                random.gauss(self.COEFF_MOYEN, self.sigma))), self.COEFF_MIN)
+            self.environnement[x][y][Indices.COEFF_RISQUE] = max(min(self.COEFF_MAX, int(
+                random.gauss(self.COEFF_MOYEN, self.sigma))), self.COEFF_MIN)
+            self.environnement[x][y][Indices.COEFF_ATTRACTION] = max(min(self.COEFF_MAX, int(
+                random.gauss(self.COEFF_MOYEN, self.sigma))), self.COEFF_MIN)
+            for v_x, v_y in self.cases_voisines(x, y, Individus.VIDE):
+                r = random.random()
+                if r < p:
+                    self.propagation_proies(v_x, v_y, self.proba_propagation_proie * p)
+
+    def propagation_preds(self, x: int, y: int, p: float):
+        """
+        Génère un prédateur dans la case (x, y) si celle-ci est vide ;
+        a une chance décroissante de recommencer pour les cases adjacentes
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        :param p: probabilité de se propager à une case adjacente
+        """
+        if self.npred <= self.nb_pred_initial and self.environnement[x][y][Indices.INDIVIDU] == Individus.VIDE:
+            self.npred += 1
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.PRED
+            self.environnement[x][y][Indices.AGE] = random.randint(0, int(1 / self.TAUX_MORT_PRED))
+            self.environnement[x][y][Indices.ENERGIE] = random.randint(self.ENERGIE_MIN_INITIAL_PRED,
+                                                                       self.ENERGIE_MAX_INITIAL_PRED)
+            self.environnement[x][y][Indices.COEFF_CHASSE] = max(min(self.COEFF_MAX, int(
+                random.gauss(self.COEFF_MOYEN, self.sigma))), self.COEFF_MIN)
+            self.environnement[x][y][Indices.COEFF_RISQUE] = max(min(self.COEFF_MAX, int(
+                random.gauss(self.COEFF_MOYEN, self.sigma))), self.COEFF_MIN)
+            self.environnement[x][y][Indices.COEFF_ATTRACTION] = max(min(self.COEFF_MAX, int(
+                random.gauss(self.COEFF_MOYEN, self.sigma))), self.COEFF_MIN)
+            for v_x, v_y in self.cases_voisines(x, y, Individus.VIDE):
+                r = random.random()
+                if r < p:
+                    self.propagation_preds(v_x, v_y, self.proba_propagation_pred * p)
+
+    # Répartition de l'environnement
+
+    def propagation_terrain(self, x: int, y: int, terrain: Terrain, p: float):
+        """
+        Attribue un type de terrain à la case (x, y) si celle-ci est vide ;
+        a une chance décroissante de recommencer pour les cases adjacentes
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        :param terrain: type de terrain à attribuer
+        :param p: probabilité de se propager à une case adjacente
+        """
+        self.environnement[x][y][Indices.TERRAIN] = terrain
+        if terrain == Terrain.OBSTACLE:
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.OBSTACLE
+        entourage = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+        for case_x, case_y in entourage:
+            if (0 <= (x + case_x) < self.HAUTEUR and 0 <= (y + case_y) < self.LARGEUR
+                    and self.environnement[x + case_x][y + case_y][Indices.TERRAIN] is Terrain.PRAIRIE):
+                r = random.random()
+                if r < p:
+                    self.propagation_terrain(x + case_x, y + case_y, terrain, self.proba_propagation_terrain * p)
+
+    # Influence de l'âge
+
+    def inf_age_reprod(self, age: int, taux: float):
+        """
+        Calcule un coefficient (en pourcents) à partir de l'âge d'un individu qui influe sur son taux de reproduction
+        :param age: l'âge de l'individu
+        :param taux: le coefficient de reproduction global (pour proie ou prédateur)
+        :return le coefficient en question
+        """
+        if not self.influence_age:
+            return self.COEFF_MOYEN
+        elif age == 0:
+            return self.COEFF_MOYEN
+        else:
+            return int(self.COEFF_MOYEN * (math.erf(taux * age) ** 2) / ((taux ** 2) * age))
+
+    def inf_age_mort(self, age: int, taux: float):
+        """
+        Calcule un coefficient (en pourcents) à partir de l'âge d'un individu qui influe sur son taux de mortalité
+        :param age: l'âge de l'individu
+        :param taux: le coefficient de mortalité global (pour proie ou prédateur)
+        :return le coefficient en question
+        """
+        if not self.influence_age:
+            return self.COEFF_MOYEN
+        elif age >= 0:
+            return self.COEFF_MOYEN
+        else:
+            return int(self.COEFF_MOYEN * 2 * ((math.erf(taux * age) / taux) -
+                                               (math.erf(taux * age) ** 2) / ((taux ** 2) * age)))
+
+    # Règles - Proies
+
+    def comportement_proie(self, x: int, y: int):
+        """
+        Effectue les différents comportements de la proie de la case (x, y)
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        """
+        # Mort
+        r = random.random()
+        if r < self.TAUX_MORT_PROIE * (self.environnement[x][y][Indices.COEFF_RISQUE] / 100) * (
+                self.inf_age_mort(self.environnement[x][y][Indices.AGE], self.TAUX_MORT_PROIE) / 100):
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
+            for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
+                self.environnement[x][y][i] = 0
+            return
+
+        # Alimentation
+        if self.environnement[x][y][Indices.RESSOURCES] > 0:
+            self.environnement[x][y][Indices.RESSOURCES] -= self.GAIN_PROIE_ALIMENTATION
+            self.environnement[x][y][Indices.ENERGIE] += self.GAIN_PROIE_ALIMENTATION
+
+        # Déplacement
+        if self.environnement[x][y][Indices.ENERGIE] <= self.PERTES_PROIE_DEPLACEMENT:
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.PROIEINACT
+            return
+
+        v = self.cases_voisines(x, y, Individus.VIDE)
+        if not v:
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.PROIEINACT
+            return
+
+        a, b = random.choice(v)
+        self.environnement[a][b][Indices.INDIVIDU] = Individus.PROIE
+        self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
+        for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
+            self.environnement[a][b][i], self.environnement[x][y][i] = self.environnement[x][y][i], 0
+        self.environnement[a][b][Indices.ENERGIE] -= self.PERTES_PROIE_DEPLACEMENT
+
+        # Reproduction
+        if self.environnement[a][b][Indices.ENERGIE] <= self.PERTES_PROIE_REPRODUCTION:
+            self.environnement[a][b][Indices.INDIVIDU] = Individus.PROIEINACT
+            return
+        r = random.random()
+        if r < self.TAUX_NAIS_PROIE * (self.environnement[a][b][Indices.COEFF_ATTRACTION] / 100) * (
+                            self.inf_age_reprod(self.environnement[a][b][Indices.AGE], self.TAUX_MORT_PROIE) / 100):
+            self.environnement[a][b][Indices.ENERGIE] -= self.PERTES_PROIE_REPRODUCTION
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.PROIEJEUNE
+            self.environnement[a][b][Indices.INDIVIDU] = Individus.PROIEINACT
+            self.environnement[x][y][Indices.AGE] = 0
+            self.environnement[x][y][Indices.ENERGIE] = random.randint(self.ENERGIE_MIN_INITIAL_PROIE,
+                                                                       self.ENERGIE_MAX_INITIAL_PROIE)
+            self.environnement[x][y][Indices.COEFF_DEFENSE] = max(min(self.COEFF_MAX, int(random.gauss(
+                (self.COEFF_MOYEN + self.environnement[a][b][Indices.COEFF_DEFENSE]) / 2, self.sigma)
+            )), self.COEFF_MIN)
+            self.environnement[x][y][Indices.COEFF_RISQUE] = max(min(self.COEFF_MAX, int(random.gauss(
+                (self.COEFF_MOYEN + self.environnement[a][b][Indices.COEFF_RISQUE]) / 2, self.sigma)
+            )), self.COEFF_MIN)
+            self.environnement[x][y][Indices.COEFF_ATTRACTION] = max(min(self.COEFF_MAX, int(random.gauss(
+                (self.COEFF_MOYEN + self.environnement[a][b][Indices.COEFF_ATTRACTION]) / 2, self.sigma)
+            )), self.COEFF_MIN)
+
+    # Règles - Prédateurs
+
+    def comportement_pred(self, x: int, y: int):
+        """
+        Effectue les différents comportements du prédateur de la case (x, y)
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        """
+        # Mort
+        r = random.random()
+        if r < self.TAUX_MORT_PRED * (self.environnement[x][y][Indices.COEFF_RISQUE] / 100) * (
+                self.inf_age_mort(self.environnement[x][y][Indices.AGE], self.TAUX_MORT_PRED) / 100):
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
+            for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
+                self.environnement[x][y][i] = 0
+            return
+
+        # Reproduction
+        if self.environnement[x][y][Indices.ENERGIE] <= self.PERTES_PRED_DEPLACEMENT:
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.PREDINACT
+            return
+        v = self.cases_voisines(x, y, Individus.PROIE) + self.cases_voisines(x, y, Individus.PROIEINACT)
+        if v:
+            a, b = random.choice(v)
+            r = random.random()
+            if r < (self.TAUX_SUCCES_CHASSE * (self.environnement[x][y][Indices.COEFF_CHASSE] / 100)
+                    / (self.environnement[a][b][Indices.COEFF_DEFENSE] / 100)
+                    * self.coeffs_terrain_chasse[self.environnement[a][b][Indices.TERRAIN]]):
+                self.environnement[a][b][Indices.INDIVIDU] = Individus.PRED
+                for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
+                    self.environnement[a][b][i], self.environnement[x][y][i] = self.environnement[x][y][i], 0
+                self.environnement[a][b][Indices.ENERGIE] += self.GAIN_PRED_ALIMENTATION
+                if self.environnement[a][b][Indices.ENERGIE] >= self.PERTES_PRED_REPRODUCTION:
+                    r = random.random()
+                    if r < self.TAUX_NAIS_PRED * (self.environnement[a][b][Indices.COEFF_ATTRACTION] / 100) * (
+                            self.inf_age_mort(self.environnement[a][b][Indices.AGE], self.TAUX_MORT_PRED) / 100):
+                        self.environnement[x][y][Indices.INDIVIDU] = Individus.PREDJEUNE
+                        self.environnement[a][b][Indices.ENERGIE] -= self.PERTES_PRED_REPRODUCTION
+                        self.environnement[x][y][Indices.AGE] = 0
+                        self.environnement[x][y][Indices.ENERGIE] = random.randint(self.ENERGIE_MIN_INITIAL_PRED,
+                                                                                   self.ENERGIE_MAX_INITIAL_PRED)
+                        self.environnement[x][y][Indices.COEFF_CHASSE] = max(min(self.COEFF_MAX, int(random.gauss(
+                            (self.COEFF_MOYEN + self.environnement[a][b][Indices.COEFF_CHASSE]) / 2, self.sigma)
+                        )), self.COEFF_MIN)
+                        self.environnement[x][y][Indices.COEFF_RISQUE] = max(min(self.COEFF_MAX, int(random.gauss(
+                            (self.COEFF_MOYEN + self.environnement[a][b][Indices.COEFF_CHASSE]) / 2, self.sigma)
+                        )), self.COEFF_MIN)
+                        self.environnement[x][y][Indices.COEFF_ATTRACTION] = max(min(self.COEFF_MAX, int(random.gauss(
+                            (self.COEFF_MOYEN + self.environnement[a][b][Indices.COEFF_CHASSE]) / 2, self.sigma)
+                        )), self.COEFF_MIN)
+                    else:
+                        self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
+                    self.environnement[a][b][Indices.INDIVIDU] = Individus.PREDINACT
+                    return
+
+        # Déplacement
+        if self.environnement[x][y][Indices.ENERGIE] <= self.PERTES_PRED_DEPLACEMENT:
+            return
+        ve = self.cases_eloignees(x, y, Individus.PROIE)
+        if ve:
+            a, b = random.choice(ve)
+            self.environnement[a][b][Indices.INDIVIDU] = Individus.PRED
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
+            for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
+                self.environnement[a][b][i], self.environnement[x][y][i] = self.environnement[x][y][i], 0
+            self.environnement[a][b][Indices.ENERGIE] -= self.PERTES_PRED_DEPLACEMENT
+            return
+        v = self.cases_voisines(x, y, Individus.VIDE)
+        if v:
+            a, b = random.choice(v)
+            self.environnement[a][b][Indices.INDIVIDU] = Individus.PRED
+            self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
+            for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
+                self.environnement[a][b][i], self.environnement[x][y][i] = self.environnement[x][y][i], 0
+            self.environnement[a][b][Indices.ENERGIE] -= self.PERTES_PRED_DEPLACEMENT
+            return
+
+    # Catastrophes naturelles
+
+    def cercle(self, x: int, y: int, r: int):
+        """
+        Renvoie une liste des cases situées dans un cercle de rayon r de centre (x, y)
+        :param x: abscisse de la case à considérer
+        :param y: ordonnée de la case à considérer
+        :param r: rayon du cercle
+        :return la liste des cases du cercle
+        """
+        cases = []
+        for i in range(-r, r):
+            for j in range(- int(math.sqrt(r * r + i * i)) + 1, int(math.sqrt(r * r + i * i))):
+                if 0 <= (x + i) < self.HAUTEUR and 0 <= (y + j) < self.LARGEUR:
+                    cases.append((x + i, y + j))
+        return cases
+
+    def catastrophe(self):
+        """
+        A une chance de tuer les proies et prédateurs dans un cercle généré aléatoirement sur la grille
+        """
+        x, y = random.randint(0, self.HAUTEUR - 1), random.randint(0, self.LARGEUR - 1)
+        r = random.randint(0, self.rayon_max)
+        for (i, j) in self.cercle(x, y, r):
+            if self.environnement[i][j][Indices.INDIVIDU] != Individus.OBSTACLE:
+                self.environnement[i][j][Indices.INDIVIDU] = Individus.VIDE
+
+    # Transformations
+
+    def transformations(self):
+        """
+        Parcourt la grille, effectue les différents comportements des agents, met à jour les âges et les ressources
+        """
+        for x in range(self.LARGEUR):
+            for y in range(self.HAUTEUR):
+                case = self.environnement[x][y]
+                if case[Indices.INDIVIDU] is Individus.PROIE:
+                    self.comportement_proie(x, y)
+                elif case[Indices.INDIVIDU] is Individus.PRED:
+                    self.comportement_pred(x, y)
+
+        for _ in range(ModeleProiePredateur.n_catastrophe):
+            if random.random() < ModeleProiePredateur.p_catastrophe:
+                self.catastrophe()
+
+        for x in range(self.LARGEUR):
+            for y in range(self.HAUTEUR):
+                case = self.environnement[x][y]
+                if case[Indices.INDIVIDU] is Individus.PROIEINACT:
+                    self.environnement[x][y][Indices.INDIVIDU] = Individus.PROIE
+                elif case[Indices.INDIVIDU] is Individus.PREDINACT:
+                    self.environnement[x][y][Indices.INDIVIDU] = Individus.PRED
+                elif case[Indices.INDIVIDU] is Individus.PROIEJEUNE:
+                    self.environnement[x][y][Indices.INDIVIDU] = Individus.PROIE
+                elif case[Indices.INDIVIDU] is Individus.PREDJEUNE:
+                    self.environnement[x][y][Indices.INDIVIDU] = Individus.PRED
+                if case[Indices.INDIVIDU] is Individus.PROIE:
+                    self.environnement[x][y][Indices.AGE] += 1
+                elif case[Indices.INDIVIDU] is Individus.PRED:
+                    self.environnement[x][y][Indices.RESSOURCES] += random.randint(0, self.GAIN_MAX_RESSOURCES_PRED)
+                    self.environnement[x][y][Indices.AGE] += 1
+                elif case[Indices.INDIVIDU] is Individus.VIDE:
+                    self.environnement[x][y][Indices.RESSOURCES] += random.randint(0, self.GAIN_MAX_RESSOURCES_VIDE)
+                if case[Indices.TERRAIN] is Terrain.DESERT:
+                    self.environnement[x][y][Indices.ENERGIE] = max(0,
+                                                                    self.environnement[x][y][Indices.ENERGIE] - 1)
+                    self.environnement[x][y][Indices.RESSOURCES] = max(0,
+                                                                       self.environnement[x][y][Indices.RESSOURCES] - 1)
+
+        self.gen += 1
+
+
+class RepresentationTourParTour:
+    def __init__(self, modele: ModeleProiePredateur, app: tk.Tk):
+        self.modele = modele
+        self.canvas = tk.Canvas(app, width=self.modele.COTE * self.modele.LARGEUR,
+                                height=self.modele.COTE * self.modele.HAUTEUR, highlightthickness=0)
+        self.canvas.pack()
+
+        for y in range(self.modele.LARGEUR):
+            for x in range(self.modele.HAUTEUR):
+                self.modele.tableau[x][y] = self.canvas.create_rectangle((x * self.modele.COTE, y * self.modele.COTE,
+                                                                          (x + 1) * self.modele.COTE,
+                                                                          (y + 1) * self.modele.COTE), outline="white",
+                                                                         fill="white")
+
+    def update_representation(self):
+        """
+        Met à jour la représentation Tkinter de la grille
+        """
+        for x in range(self.modele.LARGEUR):
+            for y in range(self.modele.HAUTEUR):
+                case = self.modele.environnement[x][y]
+                if case[Indices.INDIVIDU] is Individus.VIDE:
+                    couleur = "white"
+                elif case[Indices.INDIVIDU] is Individus.PROIE:
+                    couleur = "spring green"
+                elif case[Indices.INDIVIDU] is Individus.PRED:
+                    couleur = "firebrick1"
+                elif case[Indices.INDIVIDU] is Individus.OBSTACLE:
+                    couleur = "dim grey"
+                else:
+                    raise ValueError(f"Valeur inattendue pour case ({x}, {y}): {case}")
+
+                self.canvas.itemconfig(self.modele.tableau[x][y], fill=couleur)
+
+                if case[Indices.TERRAIN] is Terrain.FORET:
+                    self.canvas.itemconfig(self.modele.tableau[x][y], outline="saddle brown", width=2)
+                elif case[Indices.TERRAIN] is Terrain.MARAIS:
+                    self.canvas.itemconfig(self.modele.tableau[x][y], outline="dark sea green", width=2)
+                elif case[Indices.TERRAIN] is Terrain.DESERT:
+                    self.canvas.itemconfig(self.modele.tableau[x][y], outline="yellow", width=2)
+
+
+class RepresentatationGraphe:
+    def __init__(self, modele: ModeleProiePredateur):
+        self.modele = modele
+
+        self.t = []
+        self.proies = []
+        self.preds = []
+        
+        self.defense = []
+        self.chasse = []
+        self.risque_proie = []
+        self.risque_pred = []
+        self.attraction_proie = []
+        self.attraction_pred = []
+
+        fig = plt.figure(figsize=(7, 9), num="Graphes : Populations, portraits de phase")
+        spec = gridspec.GridSpec(nrows=2, ncols=1, figure=fig, hspace=0.5, wspace=0.5)
+
+        self.axproie = fig.add_subplot(spec[0, 0])
+        self.axpred = self.axproie.twinx()
+        self.axphase = fig.add_subplot(spec[1, 0])
+
+        self.axproie.set_title("Populations")
+        self.axproie.set_ylabel("Proies")
+        self.axpred.set_ylabel("Prédateurs")
+        self.axproie.set_xlabel("Génération")
+        self.axphase.set_title("Portrait de phase")
+        self.axphase.set_xlabel("Proies")
+        self.axphase.set_ylabel("Prédateurs")
+
+        if ModeleProiePredateur.SHOW_GENETICS:
+            fig2 = plt.figure(figsize=(6, 9), num="Graphes : Caractéristiques individuelles")
+            self.axcoeff = fig2.add_subplot()
+            self.axcoeff.set_xlabel("Génération")
+
+        plt.ion()
+
+    def compte_pop(self, individu: Individus):
+        """
+        Compte le nombre de cases de la grille avec l'état recherché
+        :param individu: type d'état à compter (proie ou prédateur)
+        :return le total
+        """
+        total = 0
+        for colonne in self.modele.environnement:
+            for case in colonne:
+                if case[Indices.INDIVIDU] is individu:
+                    total += 1
+        return total
+
+    def somme_coeff(self, individu: Individus, indice: Indices):
+        """
+        Calcule la somme d'un certain coefficient pour un certain état (afin de calculer une moyenne)
+        :param individu: type d'état sur lesquels effectuer le compte
+        :param indice: indique l'indice du coefficient à prendre en compte
+        :return le total
+        """
+        total = 0
+        for colonne in self.modele.environnement:
+            for case in colonne:
+                if case[Indices.INDIVIDU] is individu:
+                    total += case[indice]
+        return total
+
+    def update_representation(self):
+        """
+        Met à jour les graphiques Matplotlib
+        """
+        if self.t and self.t[-1] >= self.modele.gen:
+            return
+
+        self.axproie.clear()
+        self.axpred.clear()
+        self.axphase.clear()
+
+        compte_proies = self.compte_pop(Individus.PROIE)
+        compte_pred = self.compte_pop(Individus.PRED)
+        self.proies.append(compte_proies)
+        self.preds.append(compte_pred)
+
+        self.axproie.set_title("Populations")
+        self.axproie.set_ylabel("Proies", color=(0, 1, 0))
+        self.axpred.set_ylabel("Prédateurs", color=(1, 0, 0))
+        self.axproie.set_xlabel("Génération")
+        self.axphase.set_title("Portrait de phase")
+        self.axphase.set_xlabel("Proies", color=(0, 1, 0))
+        self.axphase.set_ylabel("Prédateurs", color=(1, 0, 0))
+
+        self.t.append(self.modele.gen)
+
+        self.axproie.plot(self.t, self.proies, color=(0, 1, 0))
+        self.axpred.plot(self.t, self.preds, color=(1, 0, 0))
+        self.axphase.plot(self.proies, self.preds, color=(0, 0, 1))
+
+        if ModeleProiePredateur.SHOW_GENETICS:
+            self.axcoeff.clear()
+            self.axcoeff.set_xlabel("Génération")
+            self.defense.append(self.somme_coeff(Individus.PROIE, Indices.COEFF_DEFENSE) / compte_proies)
+            self.chasse.append(self.somme_coeff(Individus.PRED, Indices.COEFF_CHASSE) / compte_pred)
+            self.risque_proie.append(self.somme_coeff(Individus.PROIE, Indices.COEFF_RISQUE) / compte_proies)
+            self.risque_pred.append(self.somme_coeff(Individus.PRED, Indices.COEFF_RISQUE) / compte_pred)
+            self.attraction_proie.append(self.somme_coeff(Individus.PROIE, Indices.COEFF_ATTRACTION) / compte_proies)
+            self.attraction_pred.append(self.somme_coeff(Individus.PRED, Indices.COEFF_ATTRACTION) / compte_pred)
+
+            self.axcoeff.plot(self.t, self.defense, color=(0, 0, 0), label='Défense')
+            self.axcoeff.plot(self.t, self.chasse, color=(1, 0.5, 0), label="Chasse")
+            self.axcoeff.plot(self.t, self.risque_proie, color=(0.5, 0.5, 0), label="Risque(Proies)")
+            self.axcoeff.plot(self.t, self.risque_pred, color=(0.5, 0, 0.5), label="Risque(Prédateurs)")
+            self.axcoeff.plot(self.t, self.attraction_proie, color=(1, 0.5, 0.5), label="Attraction(Proies)")
+            self.axcoeff.plot(self.t, self.attraction_pred, color=(0.5, 1, 0.5), label="Attraction(Prédateurs)")
+
+            plt.legend()
+
+        _, xmax, _, ymax = self.axproie.axis()
+        self.axproie.axis((0, xmax, 0, ymax + 100))
+        _, xmax, _, ymax = self.axpred.axis()
+        self.axpred.axis((0, xmax, 0, ymax + 100))
+        _, xmax, _, ymax = self.axphase.axis()
+        self.axphase.axis((0, xmax + 100, 0, ymax + 100))
+        
+        plt.show()
+
+
+def main():
+    app = tk.Tk()
+    app.wm_title("Modèle Proies-Prédateurs")
+
+    modele = ModeleProiePredateur()
+    representation_tour_par_tour = RepresentationTourParTour(modele, app)
+    representation_graphe = RepresentatationGraphe(modele)
+
+    def loop():
+        if ModeleProiePredateur.SHOW_GRILLE:
+            representation_tour_par_tour.update_representation()
+        representation_graphe.update_representation()
+        modele.transformations()
+        app.after(ModeleProiePredateur.pas, loop)
+
+    loop()
+    app.mainloop()
+
+
+# Lancement du programme
+if __name__ == "__main__":
+    main()
