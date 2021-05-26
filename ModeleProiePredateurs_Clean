@@ -39,28 +39,46 @@ class Terrain(IntEnum):  # Différents types de terrains au sein de l'environnem
     FORET = 2
     MARAIS = 3
     DESERT = 4
+    JUNGLE = 5
+
+
+class Saison(IntEnum):
+    HIVER = 0
+    PRINTEMPS = 1
+    ETE = 2
+    AUTOMNE = 3
 
 
 class ModeleProiePredateur:
-
     # Paramètres ajustables
 
     SHOW_GRILLE = True
     SHOW_GENETICS = False
     influence_age = True
 
-    pas = 1000
+    pas = 1200
+
+    tmax = 1200
 
     HAUTEUR = 100
     LARGEUR = 100
     COTE = 8
+
+    nb_proie = 2000
+    nb_pred = 1000
+
+    nb_obs = 100
+    nb_for = 100
+    nb_mar = 100
+    nb_des = 100
+    nb_jun = 100
 
     TAUX_NAIS_PROIE = 0.6
     TAUX_MORT_PROIE = 0.4
     TAUX_NAIS_PRED = 0.7
     TAUX_MORT_PRED = 0.2
     TAUX_SUCCES_CHASSE = 0.8
-    
+
     RESSOURCES_MAX_INITIAL = 20
     ENERGIE_MAX_INITIAL_PROIE = 20
     ENERGIE_MAX_INITIAL_PRED = 30
@@ -74,35 +92,49 @@ class ModeleProiePredateur:
     GAIN_PRED_ALIMENTATION = 10
     GAIN_MAX_RESSOURCES_VIDE = 5
     GAIN_MAX_RESSOURCES_PRED = 3
-    
+
     sigma = 50
     COEFF_MIN = 10
     COEFF_MAX = 500
     COEFF_MOYEN = 100
-    
-    coeffs_terrain_chasse = [1.0, 1.0, 0.5, 2.0, 1.0]
+
+    COEFF_MAX_REPROD_AGE = 150
+    COEFF_MAX_MORT_AGE = 150
+
+    coeffs_terrain_chasse = [1.0, 1.0, 0.5, 2.0, 1.0, 1.0]
+    PERTES_ENERGIE_DESERT = 1
+    PERTES_RESSOURCES_DESERT = 1
+    GAIN_ENERGIE_JUNGLE = 1
+    GAIN_RESSOURCES_JUNGLE = 1
 
     proba_propagation_proie = 0.8
     proba_propagation_pred = 0.5
     proba_propagation_terrain = 0.75
-    
+
     p_catastrophe = 0.01
     n_catastrophe = 5
     rayon_max = 10
-    
+
+    saison = Saison(random.randint(0, 3))
+    DUREE_SAISON = 20
+    coeffs_reprod_saison = [0.98, 1.02, 1, 1]
+    coeffs_mort_saison = [1.02, 0.98, 1.02, 1]
+    coeffs_ressources_saison = [-1, 1, 0, 0]
+
     # Initialisation
-    
+
     nproie = 0
     npred = 0
 
-    def __init__(self, nb_proie: int = 2000, nb_pred: int = 1000, nb_obs=100, nb_for=100, nb_mar=100, nb_des=100):
+    def __init__(self):
         self.gen = 0
-        self.nb_proie_initial = nb_proie
-        self.nb_pred_initial = nb_pred
-        self.nb_obs_initial = nb_obs
-        self.nb_for_initial = nb_for
-        self.nb_mar_initial = nb_mar
-        self.nb_des_initial = nb_des
+        self.nb_proie_initial = self.nb_proie
+        self.nb_pred_initial = self.nb_pred
+        self.nb_obs_initial = self.nb_obs
+        self.nb_for_initial = self.nb_for
+        self.nb_mar_initial = self.nb_mar
+        self.nb_des_initial = self.nb_des
+        self.nb_jun_initial = self.nb_jun
 
         self.environnement = [[[Individus.VIDE, 0, 0, 0, 0, 0, 0, 0, Terrain.PRAIRIE] for _ in range(self.LARGEUR)]
                               for _ in range(self.HAUTEUR)]
@@ -127,17 +159,18 @@ class ModeleProiePredateur:
         n_for = 0
         n_mar = 0
         n_des = 0
+        n_jun = 0
 
-        n_terrains = [-1, n_obs, n_for, n_mar, n_des]
-        n_terrains_initial = [-1, self.nb_obs_initial, self.nb_for_initial, self.nb_mar_initial, self.nb_des_initial]
-        liste_terrains = [Terrain.PRAIRIE, Terrain.OBSTACLE, Terrain.FORET, Terrain.MARAIS, Terrain.DESERT]
+        n_terrains = [-1, n_obs, n_for, n_mar, n_des, n_jun]
+        n_terrains_initial = [-1, self.nb_obs_initial, self.nb_for_initial, self.nb_mar_initial, self.nb_des_initial,
+                              self.nb_jun_initial]
 
         for i in range(1, len(n_terrains)):
             while n_terrains[i] != n_terrains_initial[i]:
                 x = random.randint(0, self.HAUTEUR - 1)
                 y = random.randint(0, self.LARGEUR - 1)
                 if self.environnement[x][y][Indices.TERRAIN] is Terrain.PRAIRIE:
-                    self.propagation_terrain(x, y, liste_terrains[i], self.proba_propagation_terrain)
+                    self.propagation_terrain(x, y, Terrain(i), self.proba_propagation_terrain)
                     n_terrains[i] += 1
 
         # Initialisation des proies et prédateurs
@@ -273,10 +306,8 @@ class ModeleProiePredateur:
         """
         if not self.influence_age:
             return self.COEFF_MOYEN
-        elif age == 0:
-            return self.COEFF_MOYEN
         else:
-            return int(self.COEFF_MOYEN * (math.erf(taux * age) ** 2) / ((taux ** 2) * age))
+            return int(self.COEFF_MAX_REPROD_AGE * 4 * taux ** 2 * age * age * math.exp(- 4 * taux * age + 2))
 
     def inf_age_mort(self, age: int, taux: float):
         """
@@ -287,11 +318,8 @@ class ModeleProiePredateur:
         """
         if not self.influence_age:
             return self.COEFF_MOYEN
-        elif age >= 0:
-            return self.COEFF_MOYEN
         else:
-            return int(self.COEFF_MOYEN * 2 * ((math.erf(taux * age) / taux) -
-                                               (math.erf(taux * age) ** 2) / ((taux ** 2) * age)))
+            return int(self.COEFF_MAX_MORT_AGE - self.inf_age_reprod(age, taux))
 
     # Règles - Proies
 
@@ -304,7 +332,8 @@ class ModeleProiePredateur:
         # Mort
         r = random.random()
         if r < self.TAUX_MORT_PROIE * (self.environnement[x][y][Indices.COEFF_RISQUE] / 100) * (
-                self.inf_age_mort(self.environnement[x][y][Indices.AGE], self.TAUX_MORT_PROIE) / 100):
+                self.inf_age_mort(self.environnement[x][y][Indices.AGE], self.TAUX_MORT_PROIE) / 100) * (
+                self.coeffs_mort_saison[self.saison.value]):
             self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
             for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
                 self.environnement[x][y][i] = 0
@@ -338,7 +367,8 @@ class ModeleProiePredateur:
             return
         r = random.random()
         if r < self.TAUX_NAIS_PROIE * (self.environnement[a][b][Indices.COEFF_ATTRACTION] / 100) * (
-                            self.inf_age_reprod(self.environnement[a][b][Indices.AGE], self.TAUX_MORT_PROIE) / 100):
+                self.inf_age_reprod(self.environnement[a][b][Indices.AGE], self.TAUX_MORT_PROIE) / 100) * (
+                self.coeffs_reprod_saison[self.saison.value]):
             self.environnement[a][b][Indices.ENERGIE] -= self.PERTES_PROIE_REPRODUCTION
             self.environnement[x][y][Indices.INDIVIDU] = Individus.PROIEJEUNE
             self.environnement[a][b][Indices.INDIVIDU] = Individus.PROIEINACT
@@ -366,7 +396,8 @@ class ModeleProiePredateur:
         # Mort
         r = random.random()
         if r < self.TAUX_MORT_PRED * (self.environnement[x][y][Indices.COEFF_RISQUE] / 100) * (
-                self.inf_age_mort(self.environnement[x][y][Indices.AGE], self.TAUX_MORT_PRED) / 100):
+                self.inf_age_mort(self.environnement[x][y][Indices.AGE], self.TAUX_MORT_PRED) / 100) * (
+                self.coeffs_mort_saison[self.saison.value]):
             self.environnement[x][y][Indices.INDIVIDU] = Individus.VIDE
             for i in range(Indices.AGE, Indices.COEFF_ATTRACTION + 1):
                 self.environnement[x][y][i] = 0
@@ -390,7 +421,8 @@ class ModeleProiePredateur:
                 if self.environnement[a][b][Indices.ENERGIE] >= self.PERTES_PRED_REPRODUCTION:
                     r = random.random()
                     if r < self.TAUX_NAIS_PRED * (self.environnement[a][b][Indices.COEFF_ATTRACTION] / 100) * (
-                            self.inf_age_mort(self.environnement[a][b][Indices.AGE], self.TAUX_MORT_PRED) / 100):
+                            self.inf_age_mort(self.environnement[a][b][Indices.AGE], self.TAUX_MORT_PRED) / 100) * (
+                            self.coeffs_reprod_saison[self.saison.value]):
                         self.environnement[x][y][Indices.INDIVIDU] = Individus.PREDJEUNE
                         self.environnement[a][b][Indices.ENERGIE] -= self.PERTES_PRED_REPRODUCTION
                         self.environnement[x][y][Indices.AGE] = 0
@@ -495,13 +527,22 @@ class ModeleProiePredateur:
                     self.environnement[x][y][Indices.AGE] += 1
                 elif case[Indices.INDIVIDU] is Individus.VIDE:
                     self.environnement[x][y][Indices.RESSOURCES] += random.randint(0, self.GAIN_MAX_RESSOURCES_VIDE)
+                self.environnement[x][y][Indices.RESSOURCES] += random.choice(
+                                                            (0, self.coeffs_ressources_saison[self.saison.value]))
                 if case[Indices.TERRAIN] is Terrain.DESERT:
-                    self.environnement[x][y][Indices.ENERGIE] = max(0,
-                                                                    self.environnement[x][y][Indices.ENERGIE] - 1)
-                    self.environnement[x][y][Indices.RESSOURCES] = max(0,
-                                                                       self.environnement[x][y][Indices.RESSOURCES] - 1)
+                    self.environnement[x][y][Indices.ENERGIE] = max(0, self.environnement[x][y][Indices.ENERGIE]
+                                                                    - self.PERTES_ENERGIE_DESERT)
+                    self.environnement[x][y][Indices.RESSOURCES] = max(0, self.environnement[x][y][Indices.RESSOURCES]
+                                                                       - self.PERTES_RESSOURCES_DESERT)
+                elif case[Indices.TERRAIN] is Terrain.JUNGLE:
+                    self.environnement[x][y][Indices.ENERGIE] += self.GAIN_ENERGIE_JUNGLE
+                    self.environnement[x][y][Indices.RESSOURCES] += self.GAIN_RESSOURCES_JUNGLE
 
         self.gen += 1
+
+        if self.gen % self.DUREE_SAISON == 0:
+            self.saison = Saison((self.saison.value + 1) % 4)
+            print("Saison : " + self.saison.name)
 
 
 class RepresentationTourParTour:
@@ -544,6 +585,8 @@ class RepresentationTourParTour:
                     self.canvas.itemconfig(self.modele.tableau[x][y], outline="dark sea green", width=2)
                 elif case[Indices.TERRAIN] is Terrain.DESERT:
                     self.canvas.itemconfig(self.modele.tableau[x][y], outline="yellow", width=2)
+                elif case[Indices.TERRAIN] is Terrain.JUNGLE:
+                    self.canvas.itemconfig(self.modele.tableau[x][y], outline="forest green", width=2)
 
 
 class RepresentatationGraphe:
@@ -553,7 +596,7 @@ class RepresentatationGraphe:
         self.t = []
         self.proies = []
         self.preds = []
-        
+
         self.defense = []
         self.chasse = []
         self.risque_proie = []
@@ -614,8 +657,6 @@ class RepresentatationGraphe:
         """
         Met à jour les graphiques Matplotlib
         """
-        if self.t and self.t[-1] >= self.modele.gen:
-            return
 
         self.axproie.clear()
         self.axpred.clear()
@@ -641,6 +682,9 @@ class RepresentatationGraphe:
         self.axphase.plot(self.proies, self.preds, color=(0, 0, 1))
 
         if ModeleProiePredateur.SHOW_GENETICS:
+            """
+            Met à jour les graphiques représentant les moyennes des divers coefficients individuels
+            """
             self.axcoeff.clear()
             self.axcoeff.set_xlabel("Génération")
             self.defense.append(self.somme_coeff(Individus.PROIE, Indices.COEFF_DEFENSE) / compte_proies)
@@ -665,7 +709,7 @@ class RepresentatationGraphe:
         self.axpred.axis((0, xmax, 0, ymax + 100))
         _, xmax, _, ymax = self.axphase.axis()
         self.axphase.axis((0, xmax + 100, 0, ymax + 100))
-        
+
         plt.show()
 
 
@@ -682,6 +726,9 @@ def main():
             representation_tour_par_tour.update_representation()
         representation_graphe.update_representation()
         modele.transformations()
+        if modele.gen >= modele.tmax:
+            print("Terminé")
+            return
         app.after(ModeleProiePredateur.pas, loop)
 
     loop()
